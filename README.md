@@ -1,10 +1,10 @@
 # Active Directory Attack & Detection Lab
 
-A self-hosted home lab simulating a real-world attack chain against an Active Directory environment — from initial brute-force compromise through SIEM-based detection and MITRE ATT&CK-mapped threat emulation.
+A home lab simulating an attack against an Active Directory environment, built in VirtualBox with a domain controller, a domain-joined Windows 10 endpoint, a Kali Linux attacker machine, and a Splunk SIEM, all on one internal network.
 
-Built end-to-end in VirtualBox: a Windows Server domain controller, a domain-joined Windows 10 endpoint, a Kali Linux attacker machine, and a Splunk Enterprise SIEM — all isolated on a single internal network.
+The goal was to go through a full attack chain myself - compromise a domain account over RDP, then switch hats and hunt the resulting logs in Splunk, then run a couple of MITRE ATT&CK techniques through Atomic Red Team to see what a SIEM actually catches versus what gets missed.
 
-> Inspired by MyDFIR's "Active Directory Home Lab" series, rebuilt from scratch with my own domain, users, and infrastructure, and extended with my own troubleshooting, tooling decisions, and detection queries throughout.
+Based on MyDFIR's "Active Directory Home Lab" series, but rebuilt with my own domain, users, and infrastructure, and I ran into a lot of my own problems along the way that aren't in the video (see the troubleshooting section).
 
 ---
 
@@ -13,7 +13,7 @@ Built end-to-end in VirtualBox: a Windows Server domain controller, a domain-joi
 - [Environment Overview](#environment-overview)
 - [Network Topology](#network-topology)
 - [Phase 1: Active Directory Setup](#phase-1-active-directory-setup)
-- [Phase 2: Attack Simulation — RDP Brute-Force](#phase-2-attack-simulation--rdp-brute-force)
+- [Phase 2: Attack Simulation - RDP Brute-Force](#phase-2-attack-simulation---rdp-brute-force)
 - [Phase 3: Detection in Splunk](#phase-3-detection-in-splunk)
 - [Phase 4: Threat Emulation with Atomic Red Team](#phase-4-threat-emulation-with-atomic-red-team)
 - [Challenges & Troubleshooting](#challenges--troubleshooting)
@@ -27,14 +27,14 @@ Built end-to-end in VirtualBox: a Windows Server domain controller, a domain-joi
 
 | Host | Role | OS | IP Address |
 |---|---|---|---|
-| **ADDC01** | Domain Controller | Windows Server | `192.168.10.7` |
-| **Win Target** | Domain-joined endpoint | Windows 10 | `192.168.10.100` |
-| **AD LAB KALI** | Attacker machine | Kali Linux | `192.168.10.6` (DHCP) |
-| **SPLUNK** | SIEM / log analysis | Splunk Enterprise (Ubuntu) | `192.168.10.10` |
+| ADDC01 | Domain Controller | Windows Server | 192.168.10.7 |
+| Win Target | Domain-joined endpoint | Windows 10 | 192.168.10.100 |
+| AD LAB KALI | Attacker machine | Kali Linux | 192.168.10.6 (DHCP) |
+| SPLUNK | SIEM / log analysis | Splunk Enterprise (Ubuntu) | 192.168.10.10 |
 
-**Domain:** `ricks.local`
-**Network:** All four VMs isolated on a single VirtualBox NAT Network (`AD-Project`, `192.168.10.0/24`)
-**Target user:** `RICKS\jsanchez` (IT OU)
+Domain: `ricks.local`
+Network: all four VMs isolated on a single VirtualBox NAT Network (`AD-Project`, 192.168.10.0/24)
+Target user: `RICKS\jsanchez` (IT OU)
 
 ---
 
@@ -46,52 +46,50 @@ Built end-to-end in VirtualBox: a Windows Server domain controller, a domain-joi
 
 ## Phase 1: Active Directory Setup
 
-Built a functioning Active Directory domain from the ground up:
+Built out a working AD domain before touching anything offensive:
 
-- Promoted **ADDC01** to a domain controller for `ricks.local`
-- Created organizational units (IT, HR, Users) and populated them with domain users
-- Joined **Win Target** (Windows 10) to the domain
-- Configured the target user account (`jsanchez`) with Remote Desktop access enabled for the attack simulation phase
+- Promoted ADDC01 to a domain controller for `ricks.local`
+- Created OUs (IT, HR, Users) and populated them with domain users
+- Joined Win Target to the domain
+- Configured the target account (`jsanchez`) with RDP access enabled, for the attack phase later
 
-📸 *See `screenshots/01-setup/` for AD Users and Computers configuration and domain join evidence.*
+See `screenshots/01-setup/` for the AD Users and Computers config and domain join.
 
 ---
 
-## Phase 2: Attack Simulation — RDP Brute-Force
+## Phase 2: Attack Simulation - RDP Brute-Force
 
-**Goal:** Simulate an external attacker brute-forcing RDP credentials against a domain-joined endpoint, from a separate attacker machine on the same network.
+The idea here was to simulate an outside attacker brute-forcing RDP credentials against a domain-joined endpoint from a separate machine on the same network.
 
 ### Setup
 
-- Enabled Remote Desktop on **Win Target**, authorizing the `jsanchez` domain account
-- Prepared a password wordlist on Kali using a trimmed sample from `rockyou.txt`, with the target's real password appended to guarantee a match
-- Configured Kali's DNS and `/etc/krb5.conf` to correctly resolve the `ricks.local` Kerberos realm against `ADDC01`
+- Enabled RDP on Win Target for the `jsanchez` account
+- Built a password wordlist on Kali from a trimmed sample of `rockyou.txt`, with the real target password added in so there'd be a guaranteed hit
+- Fixed Kali's DNS and `/etc/krb5.conf` so it could actually resolve the `ricks.local` Kerberos realm against ADDC01
 
 ### Execution
 
-The brute-force was carried out using **kerbrute**, a Kerberos pre-authentication-based credential-testing tool, after initial attempts with `crowbar` and `Hydra` ran into tooling issues (documented below in [Challenges & Troubleshooting](#challenges--troubleshooting)).
+I ended up using `kerbrute` for the actual brute-force, after `crowbar` and Hydra both gave me trouble (full writeup below in the troubleshooting section - neither one failed for simple reasons).
 
 ```bash
 kerbrute bruteuser -d ricks.local --dc 192.168.10.7 password.txt jsanchez
 ```
 
-**Result:** `[+] VALID LOGIN: jsanchez@ricks.local:********` — credential confirmed, followed by a live RDP session into Win Target as `jsanchez`.
+Result: `[+] VALID LOGIN: jsanchez@ricks.local:********`, followed by a live RDP session into Win Target as jsanchez.
 
-📸 *See `screenshots/02-attack/` for the brute-force success output and confirmed RDP access.*
+See `screenshots/02-attack/` for the brute-force output and the RDP session.
 
 ---
 
 ## Phase 3: Detection in Splunk
 
-With the attack complete, the focus shifted to hunting the resulting telemetry in Splunk — confirming the attack was actually visible to a defender.
+Once the attack was done, I switched over to Splunk to see what it actually caught.
 
-### Setup Note
+### Setup note
 
-Universal Forwarders on **ADDC01** and **Win Target** were already shipping Windows Security and Sysmon logs into Splunk's `endpoint` index prior to the attack.
+Universal Forwarders on ADDC01 and Win Target were already sending Windows Security and Sysmon logs into Splunk's `endpoint` index before I ran the attack.
 
-### Hunting the Attack
-
-Searched for the target user's activity across both hosts:
+### Hunting the attack
 
 ```spl
 index=endpoint jsanchez EventCode=4625
@@ -99,55 +97,55 @@ index=endpoint jsanchez EventCode=4625
 | sort -_time
 ```
 
-This surfaced a dense burst of **161 failed logon events (Event ID 4625)** on `target-pc` over a roughly 20-minute window — "Unknown user name or bad password," matching the brute-force wordlist run — followed by a successful logon (**Event ID 4624**) within minutes of the burst ending.
+This pulled up 161 failed logon events (Event ID 4625) on `target-pc` over about a 20-minute window - "Unknown user name or bad password," matching the wordlist run - followed by a successful logon (Event ID 4624) a few minutes after the failures stopped.
 
-**Detection pattern confirmed:** repeated authentication failures against a single account from a single source, in rapid succession, followed by a success — a textbook brute-force signature.
+That's the pattern I was looking for: a burst of failed auth attempts against one account from one source, then a success right after.
 
-📸 *See `screenshots/03-detection/` for the full failed-logon burst and the matching successful-logon event.*
+See `screenshots/03-detection/` for the failed-logon burst and the matching successful logon.
 
 ---
 
 ## Phase 4: Threat Emulation with Atomic Red Team
 
-To go beyond a single attack technique, I used [Atomic Red Team](https://github.com/redcanaryco/invoke-atomicredteam) to emulate two additional MITRE ATT&CK techniques directly on **Win Target**, then verified each was captured in Splunk.
+I wanted to go past just the one attack path, so I used Atomic Red Team to run a couple of MITRE ATT&CK techniques directly on Win Target and checked whether Splunk picked each one up.
 
-### T1136.001 — Create Account: Local Account
+### T1136.001 - Create Account: Local Account
 
 ```powershell
 Invoke-AtomicTest T1136.001
 ```
 
-Created a local account (`NewLocalUser`) and added it to the local Administrators group — simulating an attacker establishing persistence after initial access.
+This creates a local account (`NewLocalUser`) and adds it to the local Administrators group - basically simulating an attacker setting up persistence after getting in.
 
-**Detection:** confirmed in Splunk via Sysmon process-creation telemetry showing the full `net.exe` → `net1.exe user NewLocalUser` command chain, attributed to `RICKS\jsanchez`.
+Detection: showed up in Splunk through Sysmon process-creation logs, with the full `net.exe` -> `net1.exe user NewLocalUser` command chain, tied back to `RICKS\jsanchez`.
 
-### T1059.001 — Command and Scripting Interpreter: PowerShell
+### T1059.001 - Command and Scripting Interpreter: PowerShell
 
 ```powershell
 Invoke-AtomicTest T1059.001
 ```
 
-Executed a PowerShell command-execution test. Several sub-tests requiring external payloads (Mimikatz, BloodHound) failed due to local privilege boundaries and missing prerequisites — expected behavior in a hardened, domain-joined environment — while the core PowerShell execution sub-test completed successfully.
+A few of the sub-tests under this one (Mimikatz, BloodHound) failed because they needed external payloads/prerequisites I hadn't downloaded, and ran into local privilege restrictions - which actually makes sense on a domain-joined box. The core PowerShell execution sub-test ran fine though.
 
-**Detection:** confirmed in Splunk via Sysmon events pre-tagged with `technique_id=T1059.001, technique_name=PowerShell`.
+Detection: Splunk had this one tagged directly with `technique_id=T1059.001, technique_name=PowerShell` via Sysmon.
 
-📸 *See `screenshots/04-atomic-redteam/` for execution evidence and `screenshots/03-detection/` for the corresponding Splunk detections.*
+See `screenshots/04-atomic-redteam/` for the execution evidence and `screenshots/03-detection/` for the matching Splunk results.
 
 ---
 
 ## Challenges & Troubleshooting
 
-This lab didn't go cleanly on the first try — and I think the troubleshooting is as valuable to show as the final result.
+This didn't go smoothly on the first try, and honestly I think that's worth documenting instead of hiding.
 
-| Issue | Root Cause | Resolution |
+| Issue | Root Cause | Fix |
 |---|---|---|
-| `crowbar` returned "No results found" instantly | Outdated `/cert-ignore` flag vs. current FreeRDP's `/cert:ignore` syntax, plus stale DNS/Kerberos config on Kali | Patched crowbar's source, corrected DNS to point at the DC, added `/etc/krb5.conf` |
-| Large Kerberos clock skew between Kali and the DC | DC had no real NTP source | Synced time via `ntpdate` against the DC |
-| Hydra's RDP module silently failed to report a correct password | Known bug in Hydra's experimental RDP module | Confirmed via `BadPwdCount` math and verbose output; abandoned Hydra for RDP |
-| Hydra's SMB brute-force hung indefinitely | Windows Firewall silently dropping port 445 | Confirmed via `nmap`; SMB ruled out as an attack vector |
-| Repeated failed brute-force attempts across multiple tools | The account's actual password had drifted from what was assumed | Reset via `Set-ADAccountPassword`, confirmed via direct GUI login test |
-| Splunk license expired, blocking all searches | Enterprise Trial license expired | Attempted web UI license-group change didn't persist; resolved via direct CLI: `splunk edit licenser-groups Free -is_active 1` |
-| No Kerberos pre-authentication failure events (4771) logged | DC's default audit policy doesn't enable Kerberos Authentication Service auditing | Pivoted detection strategy to RDP-layer Event IDs (4624/4625), which were enabled by default |
+| crowbar returned "No results found" instantly | Outdated `/cert-ignore` flag vs. the `/cert:ignore` syntax current FreeRDP actually uses, plus Kali's DNS/Kerberos config pointing at the wrong place | Patched crowbar's source, fixed DNS to point at the DC, added `/etc/krb5.conf` |
+| Big Kerberos clock skew between Kali and the DC | DC had no real NTP source | Synced time with `ntpdate` against the DC |
+| Hydra's RDP module wasn't reporting the correct password even when it worked | Known bug in Hydra's (self-described) experimental RDP module | Confirmed via BadPwdCount math and verbose output, dropped Hydra for RDP |
+| Hydra's SMB brute-force just hung | Windows Firewall silently dropping port 445 | Confirmed with nmap, ruled out SMB as a vector |
+| Kept getting failed logins across multiple tools even with the password I thought was right | The account's actual password had drifted from what I assumed it was | Reset it with `Set-ADAccountPassword`, confirmed with a direct GUI login |
+| Splunk license expired, blocking all searches | Enterprise Trial license had run out | Web UI license-group change didn't actually persist after restart - fixed it from the CLI instead: `splunk edit licenser-groups Free -is_active 1` |
+| No Kerberos pre-auth failure events (4771) anywhere | DC's default audit policy doesn't enable Kerberos Authentication Service auditing | Switched detection strategy to the RDP-layer events (4624/4625) instead, which were on by default |
 
 ---
 
@@ -155,30 +153,30 @@ This lab didn't go cleanly on the first try — and I think the troubleshooting 
 
 | Technique ID | Technique Name | Tactic | Status |
 |---|---|---|---|
-| T1110 | Brute Force | Credential Access | ✅ Executed & Detected |
-| T1021.001 | Remote Desktop Protocol | Lateral Movement | ✅ Executed & Detected |
-| T1136.001 | Create Account: Local Account | Persistence | ✅ Executed & Detected |
-| T1059.001 | PowerShell | Execution | ✅ Executed & Detected |
+| T1110 | Brute Force | Credential Access | Executed & Detected |
+| T1021.001 | Remote Desktop Protocol | Lateral Movement | Executed & Detected |
+| T1136.001 | Create Account: Local Account | Persistence | Executed & Detected |
+| T1059.001 | PowerShell | Execution | Executed & Detected |
 
 ---
 
 ## Key Takeaways
 
-- A brute-force attack against a domain account is loud and highly detectable, even with only default Windows auditing enabled — the 4625/4624 pattern alone is enough to catch it.
-- Tooling reliability matters: three different brute-force tools (crowbar, Hydra, kerbrute) behaved differently against the same target, and understanding *why* each one failed was as important as getting one to succeed.
-- Default audit policies have real visibility gaps — Kerberos-specific events weren't logged at all in this environment, which is itself a useful finding for hardening recommendations.
-- Atomic Red Team is a fast way to validate whether specific MITRE ATT&CK techniques actually generate visible telemetry in a given SIEM configuration, rather than assuming detection coverage.
+- A brute-force attack against a domain account is loud. Even with just default Windows auditing turned on, the 4625/4624 pattern alone is enough to catch it.
+- Tooling isn't interchangeable - crowbar, Hydra, and kerbrute all behaved differently against the exact same target, and figuring out why each one failed mattered more than just getting one of them to work.
+- Default audit policies leave real gaps. Kerberos-specific events weren't being logged at all in this environment, which by itself is worth flagging as a hardening issue.
+- Atomic Red Team is a fast way to actually check whether a given technique generates visibility in your SIEM, instead of just assuming it does.
 
 ---
 
 ## Tools Used
 
-- **VirtualBox** — virtualization platform
-- **Active Directory Domain Services** — identity infrastructure
-- **Kali Linux** — attacker platform (`kerbrute`, `crowbar`, `Hydra`, `nmap`)
-- **Splunk Enterprise** — SIEM / log analysis
-- **Atomic Red Team** — MITRE ATT&CK technique emulation
-- **Sysmon** — endpoint telemetry
+- VirtualBox - virtualization
+- Active Directory Domain Services - identity infrastructure
+- Kali Linux - kerbrute, crowbar, Hydra, nmap
+- Splunk Enterprise - SIEM / log analysis
+- Atomic Red Team - MITRE ATT&CK technique emulation
+- Sysmon - endpoint telemetry
 
 ---
 
@@ -186,8 +184,8 @@ This lab didn't go cleanly on the first try — and I think the troubleshooting 
 
 ```
 screenshots/
-├── 01-setup/           # AD configuration, topology diagram
-├── 02-attack/          # Brute-force execution, RDP access, troubleshooting evidence
-├── 03-detection/       # Splunk queries and detection results
-└── 04-atomic-redteam/  # Atomic Red Team execution evidence
+├── 01-setup/           AD configuration, topology diagram
+├── 02-attack/          Brute-force execution, RDP access, troubleshooting evidence
+├── 03-detection/        Splunk queries and detection results
+└── 04-atomic-redteam/   Atomic Red Team execution evidence
 ```
