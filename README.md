@@ -4,8 +4,6 @@ A home lab simulating an attack against an Active Directory environment, built i
 
 The goal was to go through a full attack chain myself - compromise a domain account over RDP, then switch hats and hunt the resulting logs in Splunk, then run a couple of MITRE ATT&CK techniques through Atomic Red Team to see what a SIEM actually catches versus what gets missed.
 
-Based on MyDFIR's "Active Directory Home Lab" series, but rebuilt with my own domain, users, and infrastructure, and I ran into a lot of my own problems along the way that aren't in the video (see the troubleshooting section).
-
 ---
 
 ## Table of Contents
